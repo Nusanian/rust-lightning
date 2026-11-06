@@ -6576,6 +6576,54 @@ where
 		}
 	}
 
+	/// (Re-)broadcasts the funding transactions of all channels whose funding
+	/// transaction has not yet been confirmed on chain.
+	///
+	/// A channel's funding transaction is normally broadcast exactly once,
+	/// when `funding_signed` is received from the counterparty. If that
+	/// broadcast never reaches the network — for example because the node's
+	/// chain source was unavailable at the time — the channel would otherwise
+	/// wait forever for a confirmation that can never arrive. Calling this
+	/// method whenever chain access is (re-)established, e.g. on startup or
+	/// when a new block is received, recovers such channels.
+	///
+	/// Re-broadcasting a transaction that is already known to the network is
+	/// harmless, so this method is safe to call repeatedly; channels whose
+	/// funding transaction is already confirmed are skipped.
+	pub fn rebroadcast_pending_funding_transactions(&self) {
+		PersistenceNotifierGuard::optionally_notify(self, || {
+			let mut notify = NotifyOption::SkipPersistNoEvents;
+			let per_peer_state = self.per_peer_state.read().unwrap();
+			for (_, peer_state_mutex) in per_peer_state.iter() {
+				let mut peer_state_lock = peer_state_mutex.lock().unwrap();
+				let peer_state = &mut *peer_state_lock;
+				for (_, channel_phase) in peer_state.channel_by_id.iter_mut() {
+					if let Some(channel) = channel_phase.as_funded_mut() {
+						if let Some(tx) = channel.broadcastable_funding_transaction() {
+							if channel.context.is_manual_broadcast() {
+								match channel.funding.get_funding_txo() {
+									Some(funding_txo) => {
+										if !channel.context.funding_tx_broadcast_safe_event_emitted() {
+											notify = NotifyOption::DoPersist;
+										}
+										let mut pending_events =
+											self.pending_events.lock().unwrap();
+										emit_funding_tx_broadcast_safe_event!(pending_events, channel, funding_txo.into_bitcoin_outpoint())
+									},
+									None => debug_assert!(false, "Channel awaiting broadcast without a funding txo, this should never happen!"),
+								};
+							} else {
+								log_info!(self.logger, "Re-broadcasting funding transaction with txid {}", tx.compute_txid());
+								self.tx_broadcaster.broadcast_transactions(&[&tx]);
+							}
+						}
+					}
+				}
+			}
+			notify
+		});
+	}
+
 	/// Atomically applies partial updates to the [`ChannelConfig`] of the given channels.
 	///
 	/// Once the updates are applied, each eligible channel (advertised with a known short channel

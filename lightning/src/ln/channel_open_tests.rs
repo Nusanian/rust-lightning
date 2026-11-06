@@ -2544,3 +2544,45 @@ fn test_fund_pending_channel() {
 	};
 	check_closed_event!(nodes[0], 1, reason, [node_b_id], 100_000);
 }
+
+#[test]
+fn test_rebroadcast_pending_funding_transactions() {
+	// A channel's funding transaction is broadcast once when `funding_signed`
+	// is received. If that broadcast never reaches the network (e.g. because
+	// the chain source was unavailable at the time), the channel would wait
+	// forever for a confirmation that cannot arrive. Check that
+	// `rebroadcast_pending_funding_transactions` re-broadcasts the stored
+	// funding transaction while it is unconfirmed, and stops doing so once it
+	// has confirmed on chain.
+	let chanmon_cfgs = create_chanmon_cfgs(2);
+	let node_cfgs = create_node_cfgs(2, &chanmon_cfgs);
+	let node_chanmgrs = create_node_chanmgrs(2, &node_cfgs, &[None, None]);
+	let nodes = create_network(2, &node_cfgs, &node_chanmgrs);
+
+	// Open a channel, leaving the funding transaction broadcast but unmined.
+	// (`sign_funding_transaction` has already asserted and drained the
+	// initial broadcast that happened when `funding_signed` was handled.)
+	let tx = create_chan_between_nodes_with_value_init(&nodes[0], &nodes[1], 100_000, 0);
+	assert!(nodes[0].tx_broadcaster.txn_broadcasted.lock().unwrap().is_empty());
+
+	// While the funding transaction is unconfirmed, the rebroadcast method
+	// re-broadcasts exactly that transaction.
+	nodes[0].node.rebroadcast_pending_funding_transactions();
+	{
+		let mut broadcasted = nodes[0].tx_broadcaster.txn_broadcasted.lock().unwrap();
+		assert_eq!(broadcasted.len(), 1);
+		assert_eq!(broadcasted[0], tx);
+		broadcasted.clear();
+	}
+
+	// The fundee never broadcasts the funding transaction.
+	nodes[1].node.rebroadcast_pending_funding_transactions();
+	assert!(nodes[1].tx_broadcaster.txn_broadcasted.lock().unwrap().is_empty());
+
+	// Once the funding transaction has confirmed, it is not broadcast again.
+	mine_transaction(&nodes[0], &tx);
+	mine_transaction(&nodes[1], &tx);
+	nodes[0].tx_broadcaster.txn_broadcasted.lock().unwrap().clear();
+	nodes[0].node.rebroadcast_pending_funding_transactions();
+	assert!(nodes[0].tx_broadcaster.txn_broadcasted.lock().unwrap().is_empty());
+}

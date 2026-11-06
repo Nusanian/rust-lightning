@@ -9440,6 +9440,28 @@ where
 		}
 	}
 
+	/// Returns the funding transaction if it is due for (re-)broadcast: the
+	/// channel is outbound (or V2-established), past the funding negotiation,
+	/// and the funding transaction has not yet been confirmed on chain.
+	///
+	/// This mirrors the re-broadcast condition applied in
+	/// [`Self::monitor_updating_restored`], for callers that drive funding
+	/// broadcasts outside the monitor-update lifecycle.
+	pub fn broadcastable_funding_transaction(&self) -> Option<Transaction> {
+		if let Some(funding_transaction) = &self.funding.funding_transaction {
+			if (self.funding.is_outbound() || self.is_v2_established()) &&
+				(matches!(self.context.channel_state, ChannelState::AwaitingChannelReady(flags) if !flags.is_set(AwaitingChannelReadyFlags::WAITING_FOR_BATCH)) ||
+				matches!(self.context.channel_state, ChannelState::ChannelReady(_)))
+			{
+				// Broadcast only if not yet confirmed
+				if self.funding.get_funding_tx_confirmation_height().is_none() {
+					return Some(funding_transaction.clone());
+				}
+			}
+		}
+		None
+	}
+
 	pub fn check_for_stale_feerate<L: Logger>(
 		&mut self, logger: &L, min_feerate: u32,
 	) -> Result<(), ClosureReason> {
